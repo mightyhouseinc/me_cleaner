@@ -68,12 +68,12 @@ class regionFile:
 
     def move_range(self, offset_from, size, offset_to, fill):
         if offset_from >= self.region_start and \
-           offset_from + size <= self.region_end and \
-           offset_to >= self.region_start and \
-           offset_to + size <= self.region_end:
+               offset_from + size <= self.region_end and \
+               offset_to >= self.region_start and \
+               offset_to + size <= self.region_end:
             for i in range(0, size, 4096):
                 self.f.seek(offset_from + i, 0)
-                block = self.f.read(4096 if size - i >= 4096 else size - i)
+                block = self.f.read(min(size - i, 4096))
                 self.f.seek(offset_from + i, 0)
                 self.f.write(fill * len(block))
                 self.f.seek(offset_to + i, 0)
@@ -93,7 +93,7 @@ def get_chunks_offsets(llut, me_start):
         offset = 0
 
         if chunk[3] != 0x80:
-            offset = unpack("<I", chunk[0:3] + b"\x00")[0] + me_start
+            offset = unpack("<I", chunk[:3] + b"\x00")[0] + me_start
 
         offsets.append([offset, 0])
         if offset != 0:
@@ -125,7 +125,7 @@ def remove_modules(f, mod_headers, ftpr_offset, me_end):
 
         sys.stdout.write(" {:<16} ({:<7}, ".format(name, comp_str[comp_type]))
 
-        if comp_type == 0x00 or comp_type == 0x02:
+        if comp_type in [0x00, 0x02]:
             sys.stdout.write("0x{:06x} - 0x{:06x}): "
                              .format(offset, offset + size))
 
@@ -172,14 +172,17 @@ def remove_modules(f, mod_headers, ftpr_offset, me_end):
                              "skipping".format(offset, offset + size))
 
     if chunks_offsets:
-        removable_huff_chunks = []
-
-        for chunk in chunks_offsets:
-            if all(not(unremovable_chk[0] <= chunk[0] < unremovable_chk[1] or
-                       unremovable_chk[0] < chunk[1] <= unremovable_chk[1])
-                   for unremovable_chk in unremovable_huff_chunks):
-                removable_huff_chunks.append(chunk)
-
+        removable_huff_chunks = [
+            chunk
+            for chunk in chunks_offsets
+            if all(
+                not (
+                    unremovable_chk[0] <= chunk[0] < unremovable_chk[1]
+                    or unremovable_chk[0] < chunk[1] <= unremovable_chk[1]
+                )
+                for unremovable_chk in unremovable_huff_chunks
+            )
+        ]
         for removable_chunk in removable_huff_chunks:
             if removable_chunk[1] > removable_chunk[0]:
                 end = min(removable_chunk[1], me_end)
@@ -220,12 +223,14 @@ def relocate_partition(f, me_start, me_end, partition_header_offset,
     old_offset, partition_size = unpack("<II", f.read(0x8))
     old_offset += me_start
 
-    llut_start = 0
-    for mod_header in mod_headers:
-        if (unpack("<I", mod_header[0x50:0x54])[0] >> 4) & 7 == 0x01:
-            llut_start = unpack("<I", mod_header[0x38:0x3C])[0] + old_offset
-            break
-
+    llut_start = next(
+        (
+            unpack("<I", mod_header[0x38:0x3C])[0] + old_offset
+            for mod_header in mod_headers
+            if (unpack("<I", mod_header[0x50:0x54])[0] >> 4) & 7 == 0x01
+        ),
+        0,
+    )
     if llut_start != 0:
         # Bytes 0x9:0xb of the LLUT (bytes 0x1:0x3 of the AddrBase) are added
         # to the SpiBase (bytes 0xc:0x10 of the LLUT) to compute the final
@@ -268,9 +273,11 @@ def relocate_partition(f, me_start, me_end, partition_header_offset,
             f.readinto(chunks)
             for i in range(0, chunk_count * 4, 4):
                 if chunks[i + 3] != 0x80:
-                    chunks[i:i + 3] = \
-                        pack("<I", unpack("<I", chunks[i:i + 3] +
-                             b"\x00")[0] + offset_diff)[0:3]
+                    chunks[i : i + 3] = pack(
+                        "<I",
+                        unpack("<I", chunks[i : i + 3] + b"\x00")[0]
+                        + offset_diff,
+                    )[:3]
             f.write_to(llut_start + 0x40, chunks)
         else:
             sys.exit("Huffman modules present but no LLUT found!")
